@@ -1,0 +1,11 @@
+# VRMモデルを除外（これで sample.vrm はアップロードされません）
+*.vrm
+
+# Pythonのキャッシュや仮想環境も除外（これらはGitHubには不要）
+__pycache__/
+venv/
+.venv/
+.env
+
+# VS Codeの設定ファイル（個人設定なので除外）
+.vscode/

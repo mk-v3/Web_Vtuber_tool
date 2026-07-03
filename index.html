@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Web VTuber Tool</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #00ff00; /* OBSキャプチャ用のグリーンバック */
+            overflow: hidden;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+        }
+        #status {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: sans-serif;
+            background: rgba(0,0,0,0.5);
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            z-index: 999;
+        }
+    </style>
+    
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.154.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.154.0/examples/jsm/",
+          "@pixiv/three-vrm": "https://unpkg.com/@pixiv/three-vrm@2.1.0/lib/three-vrm.module.js"
+        }
+      }
+    </script>
+</head>
+<body>
+
+    <div id="status">🔴 Python未接続</div>
+    <div id="canvas-container"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { VRMLoaderPlugin, VRMExpressionPresetName } from '@pixiv/three-vrm';
+
+        let currentVrm = null;
+
+        // ブレ防止（LERP）用の「目標値」
+        let targetSmile = 0.0;
+        let targetNeck = { x: 0.0, y: 0.0, z: 0.0 };
+
+        // --- ① Three.js の基本セットアップ ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+
+        const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20.0);
+        camera.position.set(0.0, 1.4, 1.2); 
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.appendChild(renderer.domElement);
+
+        // ライト数値 (0.5 / 0.1) 固定
+        const light = new THREE.DirectionalLight(0xffffff, 0.8);
+        light.position.set(1.0, 1.0, 1.0).normalize();
+        scene.add(light);
+        
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.1);
+        scene.add(ambientLight);
+
+        // --- ② VRMモデルの読み込み ---
+        const loader = new GLTFLoader();
+        loader.register((parser) => {
+            return new VRMLoaderPlugin(parser);
+        });
+
+        loader.load(
+            './sample.vrm',
+            (gltf) => {
+                const vrm = gltf.userData.vrm;
+                currentVrm = vrm;
+                scene.add(vrm.scene);
+                vrm.scene.rotation.y = Math.PI; 
+                console.log('VRM読み込み成功！規格:', vrm.meta?.metaVersion || '不明');
+            },
+            (progress) => console.log('読み込み中...'),
+            (error) => {
+                console.error('【重要】ファイルが正しく配置されていないか、名前が違います:', error);
+                alert('sample.vrm が見つからないか、エラーが発生しました。フォルダを確認してください。');
+            }
+        );
+
+        // --- ③ 毎フレームの描画ループ ---
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+
+            if (currentVrm) {
+                // 1. 表情（笑顔）の適用
+                if (currentVrm.expressionManager) {
+                    const currentSmile = currentVrm.expressionManager.getValue(VRMExpressionPresetName.Happy) || 0;
+                    const easedSmile = THREE.MathUtils.lerp(currentSmile, targetSmile, 0.08);
+                    currentVrm.expressionManager.setValue(VRMExpressionPresetName.Happy, easedSmile);
+                    currentVrm.expressionManager.update();
+                }
+
+                // 2. 首と体（胸）のボーン制御 (VRM 0.0 / 1.0 完全両対応モード)
+                let neckBoneNode = null;
+                let chestBoneNode = null;
+
+                if (currentVrm.humanoid) {
+                    // VRM 1.0 の取得方法を試す
+                    if (typeof currentVrm.humanoid.getNormalizedBoneNode === 'function') {
+                        neckBoneNode = currentVrm.humanoid.getNormalizedBoneNode('neck');
+                        chestBoneNode = currentVrm.humanoid.getNormalizedBoneNode('upperChest') || 
+                                        currentVrm.humanoid.getNormalizedBoneNode('chest') || 
+                                        currentVrm.humanoid.getNormalizedBoneNode('spine');
+                    } 
+                    // 失敗したら VRM 0.0 の取得方法を試す
+                    if (!neckBoneNode && typeof currentVrm.humanoid.getRawBoneNode === 'function') {
+                        neckBoneNode = currentVrm.humanoid.getRawBoneNode('neck');
+                        chestBoneNode = currentVrm.humanoid.getRawBoneNode('upperChest') || 
+                                        currentVrm.humanoid.getRawBoneNode('chest') || 
+                                        currentVrm.humanoid.getRawBoneNode('spine');
+                    }
+                }
+
+                // 最終手段：Three.jsのシーンからダイレクトに名前検索（バックアップ）
+                if (!neckBoneNode || !chestBoneNode) {
+                    currentVrm.scene.traverse((object) => {
+                        if (object.isBone) {
+                            if (!neckBoneNode && object.name.toLowerCase().includes('neck')) neckBoneNode = object;
+                            if (!chestBoneNode && (object.name.toLowerCase().includes('chest') || object.name.toLowerCase().includes('spine'))) chestBoneNode = object;
+                        }
+                    });
+                }
+
+                // 💡 首の回転を適用 (LERP 0.06 / オフセット 0.2)
+                if (neckBoneNode) {
+                    const pitchOffset = 0.6; 
+                    neckBoneNode.rotation.x = THREE.MathUtils.lerp(neckBoneNode.rotation.x, targetNeck.x + pitchOffset, 0.06);
+                    neckBoneNode.rotation.y = THREE.MathUtils.lerp(neckBoneNode.rotation.y, targetNeck.y, 0.06);
+                    neckBoneNode.rotation.z = THREE.MathUtils.lerp(neckBoneNode.rotation.z, targetNeck.z, 0.06);
+                }
+
+                // 💡 体の回転を適用
+                if (chestBoneNode) {
+                    chestBoneNode.rotation.x = THREE.MathUtils.lerp(chestBoneNode.rotation.x, targetNeck.x * 0.2, 0.06);
+                    chestBoneNode.rotation.y = THREE.MathUtils.lerp(chestBoneNode.rotation.y, targetNeck.y * 0.3, 0.06);
+                    chestBoneNode.rotation.z = THREE.MathUtils.lerp(chestBoneNode.rotation.z, targetNeck.z * 0.3, 0.06);
+                }
+
+                currentVrm.update(delta);
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // --- ④ WebSocket通信 ---
+        const ws = new WebSocket('ws://localhost:8765');
+        const statusDiv = document.getElementById('status');
+
+        ws.onopen = () => statusDiv.textContent = '🟢 Python接続中';
+        ws.onclose = () => statusDiv.textContent = '🔴 Python未接続';
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            targetSmile = data.smile;
+            targetNeck.x = data.neck.x;
+            targetNeck.y = -data.neck.y * 1.5; 
+            targetNeck.z = -data.neck.z;       
+        };
+
+        window.addEventListener('resize', onWindowResize, false);
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+</html>
